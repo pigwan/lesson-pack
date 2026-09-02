@@ -43,14 +43,19 @@
 
 ### 方式 A：作为 WorkBuddy Agent Skill 使用（推荐给老师）
 
-把整个 `lesson-pack/` 目录放进 WorkBuddy 的用户级 Skills 目录，即可在对话里直接用自然语言触发：
+> ⚠️ 本仓库目录同时是「开源 git 项目」+「Skill 包」两种形态。**不要直接 `cp -r` 整个目录**——会把 `.git`（超深嵌套）一并带进去，Skill 解析器会报「目录层级超限，仅支持两级目录结构」。请用发布脚本生成合规的干净副本后再装：
 
 ```bash
-# macOS / Linux
-cp -r lesson-pack ~/.workbuddy/skills/
+# 1) 生成干净的两级 Skill 包（产出 dist/lesson-pack/ 与 dist/lesson-pack.zip）
+bash scripts/make_skill_release.sh
+
+# 2) 装到用户级 Skills 目录（macOS / Linux）
+rsync -a dist/lesson-pack/ ~/.workbuddy/skills/lesson-pack/
 ```
 
-然后在 AI 助手（如 WorkBuddy）里直接说：
+也可以在 WorkBuddy 里直接导入 `dist/lesson-pack.zip`。
+
+装好后，在 AI 助手（如 WorkBuddy）里直接说：
 
 ```
 帮我备一节数学课，八年级上一次函数，45 分钟
@@ -137,7 +142,10 @@ lesson-pack/
 │   └── 样例_七年级数学_一元一次方程_45分钟.html   # 档A 成品样例（浏览器打开看效果）
 ├── scripts/
 │   ├── lesson_pack_html.py   # 档A：内容 JSON → 自包含 HTML 教学包（零第三方依赖）
-│   └── lesson_pack_gen.py    # 档B：内容 JSON → docx×4 + pptx（python-docx/pptx）
+│   ├── lesson_pack_gen.py    # 档B：内容 JSON → docx×4 + pptx（python-docx/pptx）
+│   └── make_skill_release.sh # 生成合规两级 Skill 发布包（排除 .git/LICENSE/README/assets）
+├── assets/
+│   └── wechat-qr.jpg         # 作者微信二维码（仅 README 联系作者用，Skill 本体不引用）
 └── templates/
     ├── lesson-content.schema.md                     # 内容 JSON 结构规范（机器可读）
     ├── 示例_语文_七年级_咏雪_40分钟.json            # 语文可跑样例
