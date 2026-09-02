@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 生成产物（不要提交别人生成的教案/课件）
+data/
+*.docx
+*.pptx
+教学包*.html
