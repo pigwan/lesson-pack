@@ -170,6 +170,16 @@ lesson-pack/
 
 ---
 
+## 联系作者
+
+有问题想交流、想直接找到作者提需求？欢迎扫下面的微信二维码添加好友（备注「教案小助手」可优先通过）：
+
+<img src="assets/wechat-qr.jpg" alt="作者微信二维码" width="220" />
+
+或在该仓库提 [Issue](https://github.com/pigwan/lesson-pack/issues) / [Discussion](https://github.com/pigwan/lesson-pack/discussions) 也行。
+
+---
+
 ## License
 
 [MIT](LICENSE)
