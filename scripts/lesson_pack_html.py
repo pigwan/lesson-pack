@@ -15,11 +15,52 @@ import os, sys, argparse, json, html, datetime
 def esc(s):
     return html.escape(str(s), quote=False)
 
-def to_cn(n):
-    """1→一 … 10→十"""
-    c = "零一二三四五六七八九"
-    if n < 10: return c[n]
-    return c[1] + ("十" if n == 10 else ("十" + c[n - 10]))
+def check_time(L):
+    """时间账硬校验（quality-checklist A 项）：时间总表求和 == 课时，且环节分求和也 == 课时。
+    档A 此前完全没有校验，时间账错了也静默产出——与 quality-checklist 的"A 项不过必须返工"矛盾。
+    与 lesson_pack_gen.py 的 check_time 保持同一套规则，两档口径一致。"""
+    issues = []
+    total = None
+    try:
+        total = sum(int(m) for _, m in L.get('时间总表') or [])
+    except Exception as e:
+        issues.append(f"时间总表格式异常（应为 [[环节名, 分钟], …]）：{e}")
+    if total is not None:
+        try:
+            if total != int(L.get('课时')):
+                issues.append(f"时间总表合计 {total}′ ≠ 课时 {L.get('课时')}′")
+        except Exception:
+            issues.append(f"课时字段缺失或非数字：{L.get('课时')!r}")
+    try:
+        ph_sum = sum(int(p['分']) for p in L.get('环节') or [])
+        if ph_sum != int(L.get('课时')):
+            issues.append(f"各环节分钟合计 {ph_sum}′ ≠ 课时 {L.get('课时')}′")
+    except Exception as e:
+        issues.append(f"环节分钟（环节[].分）格式异常：{e}")
+    return (len(issues) == 0), issues
+
+
+def exercise_minutes(L):
+    """课堂练习卷建议用时，取值优先级：lesson.练习时长 > 含"练习/巩固/训练/检测"的环节分钟
+    > 课时/3（夹在 5–20′）。旧实现直接写整节课时长（如 40′），明显不对。
+    与 lesson_pack_gen.py 的 exercise_minutes 规则一致，保证两档显示同一个数。"""
+    v = L.get('练习时长')
+    if v:
+        try:
+            return int(v)
+        except Exception:
+            pass
+    for ph in (L.get('环节') or []):
+        if any(k in str(ph.get('名', '')) for k in ('练习', '巩固', '训练', '检测')):
+            try:
+                return int(ph['分'])
+            except Exception:
+                pass
+    try:
+        return min(20, max(5, int(L.get('课时', 40)) // 3))
+    except Exception:
+        return 15
+
 
 def fmt_time_ts(ts):
     """时间总表 → '导入 4′ ｜ 新授 18′…'"""
@@ -74,7 +115,7 @@ CSS = """
 
 def sheet_design(L):
     """纸1 教学设计"""
-    b = L["板书"]
+    b = L.get("板书") or {}   # 板书缺失时降级为只显示课题，不再 KeyError 崩溃
     objs = []
     objs.append('<section class="sheet">')
     objs.append(f"<h1>教 学 设 计</h1>")
@@ -112,12 +153,13 @@ def sheet_design(L):
     # 板书
     objs.append("<h2>五、板书设计</h2>")
     objs.append('<div class="board">')
-    objs.append(f"<b>{esc(b['title'])}</b>")
-    objs.append(f'<div style="margin:2px 0">{esc(b.get("concept", ""))}</div>')
+    objs.append(f"<b>{esc(b.get('title') or L['课题'])}</b>")
+    if b.get("concept"):
+        objs.append(f'<div style="margin:2px 0">{esc(b["concept"])}</div>')
     objs.append('<div style="display:flex;gap:24px;margin-top:8px">')
     cols = []
     for col in ("left", "mid", "right"):
-        cols.append(f"<div style='flex:1'>" + "<br>".join(esc(x) for x in b[col]) + "</div>")
+        cols.append(f"<div style='flex:1'>" + "<br>".join(esc(x) for x in (b.get(col) or [])) + "</div>")
     objs.append("".join(cols))
     objs.append("</div></div>")
     objs.append('<div class="page-note">—— 教学设计 · 第 1 页 ——</div>')
@@ -151,14 +193,22 @@ def sheet_worksheet(L, tasks):
          f'<div class="subtitle">{esc(L["课题"])} · 课堂用</div>',
          hd_line(extra_right="座号<span class='fill' style='min-width:40px'></span>")]
     goals = L["教学目标"]
-    goal_sum = "；".join("□ " + i for _, its in goals[:2] for i in its[:1])
+    # 取法与档B(make_worksheet_docx)一致：每类最多前 2 条、总共最多 4 条。
+    # 旧实现只取"前 2 类各 1 条"，导致两档学案目标条数不一致。
+    _sel = []
+    for _cat, _its in goals:
+        for _g in _its[:2]:
+            if len(_sel) < 4:
+                _sel.append(_g)
+    goal_sum = "　".join("□ " + i for i in _sel)
     o.append(f"<p><b>学习目标：</b>学完我能——{goal_sum}</p>")
     for hname, no, body in tasks:
         o.append(f"<h3>{esc(hname)}</h3>")
         # 首行为题干，换行后用作答留空
         o.append(q_block(no, body_multi(body), lines=0))
-        # 若题干含 ____ 填空则不再另加空行
-        o.append("".join('<div class="answer-line"></div>' for _ in range(1)))
+        # 题干里已带 ____ 填空线时不再另加整行作答空，避免重复留白
+        if not ("＿" in body or "__" in body):
+            o.append('<div class="answer-line"></div>')
     o.append('<div class="page-note">—— 学习任务单 · 发给学生当堂用 ——</div></section>')
     return "\n".join(o)
 
@@ -166,7 +216,7 @@ def sheet_exercise(L, exercises):
     """纸3 课堂分层练习(含答案)"""
     o = ['<section class="sheet paper">', "<h2>课堂分层练习</h2>",
          f'<div class="subtitle">{esc(L["课题"])} · 附答案（老师用，答案不下发）</div>',
-         hd_line(extra_right="时间 " + str(sum(m for _, m in L["时间总表"])) + "′")]
+         hd_line(extra_right=f"时间 {exercise_minutes(L)}′")]
     ans_map = []
     for group, items in exercises:
         o.append(f'<p style="color:#777">{esc(group)}</p>')
@@ -196,10 +246,28 @@ def sheet_homework(L, homework):
     o.append('<div class="page-note">—— 课后作业 ——</div></section>')
     return "\n".join(o)
 
+# lesson 必填字段（结构见 templates/lesson-content.schema.md）。
+# 缺字段集中报错，避免渲染到一半 KeyError 崩溃、用户拿到半截 HTML。
+BASE_REQUIRED = ['学科', '年级', '教材', '章节', '课题', '课型', '课时',
+                 '课时标签', '教学目标', '重难点', '学情', '时间总表', '环节']
+
+
 def render(data):
     L = data.get("lesson")
     if not L:
-        raise SystemExit("JSON 缺顶层 'lesson'")
+        raise SystemExit("✗ 内容 JSON 缺顶层 'lesson' 键（结构见 templates/lesson-content.schema.md）")
+    miss = [k for k in BASE_REQUIRED
+            if k not in L or (isinstance(L[k], (str, list, dict)) and len(L[k]) == 0)]
+    if miss:
+        raise SystemExit("✗ 内容 JSON 的 lesson 缺少必填字段：" + "、".join(miss) +
+                         "（结构见 templates/lesson-content.schema.md）")
+    ok, issues = check_time(L)
+    if not ok:
+        print("  ⚠ 时间账不平（quality-checklist A 项，请修订内容 JSON）：")
+        for it in issues:
+            print("      - " + it)
+    if data.get("homework") and not L.get("作业说明"):
+        raise SystemExit("✗ 提供了 homework，但 lesson 缺 '作业说明'（作业量说明）")
     title = f'{L["课题"]} · 教案与配套（{L["教材"]} · {L["课时标签"]} · {L["课时"]}分钟）'
     parts = [sheet_design(L)]
     if data.get("worksheet_tasks"):
@@ -223,12 +291,30 @@ def main():
     ap = argparse.ArgumentParser(description="档A：单源JSON → 自包含HTML教学包")
     ap.add_argument("--data", required=True, help="单源内容JSON(见 templates/lesson-content.schema.md)")
     ap.add_argument("--out", default="教学包.html", help="输出HTML路径")
+    ap.add_argument("--strict-time", action="store_true",
+                    help="时间账（环节分钟合计≠课时）不平时直接终止，不生成 HTML。"
+                         "默认仅告警后继续（与档B 行为一致）。")
     a = ap.parse_args()
+    # --out 若指向不存在的目录（如 教学包/咏雪/教学包.html），自动建目录；
+    # 档B 有 os.makedirs，档A 没有，同样的路径档B 能出、档A 直接 FileNotFoundError。
+    _d = os.path.dirname(os.path.abspath(a.out))
+    if _d:
+        os.makedirs(_d, exist_ok=True)
     data = json.load(open(a.data, encoding="utf-8"))
+    if a.strict_time:
+        L0 = data.get("lesson") or {}
+        ok, _issues = check_time(L0)
+        if not ok:
+            raise SystemExit("✗ 已启用 --strict-time，时间账不平即终止，未生成文件。")
     h = render(data)
     with open(a.out, "w", encoding="utf-8") as f:
         f.write(h)
-    print("已生成 " + a.out + f"（{len(h)//1024}KB，含教学设计/学案/练习/作业各纸）")
+    print("已生成 " + a.out + f"（{len(h)//1024}KB）")
+    # 哪些纸没出要说清楚，避免老师以为"整套齐了"结果发现少了作业页
+    for key, name in (('worksheet_tasks', '学习任务单'), ('exercises', '课堂分层练习'),
+                      ('homework', '课后作业')):
+        if not data.get(key):
+            print(f"  · 内容 JSON 未提供 '{key}'，已跳过「{name}」页")
 
 if __name__ == "__main__":
     main()

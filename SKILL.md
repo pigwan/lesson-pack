@@ -6,7 +6,7 @@ display_name_en: Lesson Pack Generator
 description_zh: 面向中小学老师的一节课成套备课生成器。输入「学科 + 年级 + 课题 + 课时长」，一次产出教学设计(教案)、教学课件、学习任务单(学案)、分层练习题(含答案)、课后作业整套配套，全环节时间严格等于上课时长，可喂教材原文、适配中国课标/人教版。
 description_en: "One-shot lesson package generator for K-12 teachers. Input subject + grade + topic + class length, and get a complete set: lesson plan, slides, worksheet, leveled exercises (with answers) and homework — with every segment's minutes summing exactly to the class duration. Adapts to China curriculum standards and supports feeding textbook source text."
 agent_created: true
-version: 0.1.0
+version: 0.1.1
 ---
 
 # lesson-pack — 课时教学包生成器
@@ -67,7 +67,8 @@ version: 0.1.0
 - JSON 里的 `lesson.环节` 同时是教案、PPT 页、学案的共同来源，**全由它派生，不再手工分写**。
 - 完成 JSON 后，档A(HTML)/档B(Office) 一条命令各出全套，见第 5 步。
 - `templates/` 下的 `courseware-outline / worksheet / exercise / homework` 模板是设计时想清楚"每块放什么题/什么要点"的**思考参考**，不是再写一遍的交付物——内容最终都收进这份 JSON。
-- 可用 `scripts/lesson_pack_gen.py` 的载入校验兜底查时间账（时间总表≠课时会打 ⚠）。
+- **两条时间账都会被脚本核**：`时间总表` 求和 与 `环节[].分` 求和，都必须 = `课时`。不平会打 ⚠ 明细（默认只告警继续）；要"不平就别出"，加 `--strict-time`（退出码非 0，不产出文件）。档A/档B 同一套规则。
+- **缺顶层键 = 跳过对应产物，不用内置样例回填**：只给了 `lesson` 就只出「教学设计 + 教学课件」，学案/练习/作业会被显式跳过并打印原因。**绝不允许**出现"语文课的作业里是一元一次方程"这种串味产物。
 
 ### 第 4 步：质量自检（硬校验，不达标要重做）
 逐条对照 `quality-checklist.md` 全量清单核对，任一不通过则修订后再交付。核心硬规则：
@@ -83,8 +84,8 @@ version: 0.1.0
 > **写内容 = 先按 `templates/lesson-content.schema.md` 把单源落成 JSON**，档A/档B 都吃同一份，保证两档一致。
 > 完整可参考示例：`templates/示例_语文_七年级_咏雪_40分钟.json`（语文）与脚本内置数学《一元一次方程》样例。
 >
-> - **档 A（自包含 HTML 教学包）**：`python scripts/lesson_pack_html.py --data <内容.json> --out 教学包.html`，渲染为一页页"纸张"（教学设计/学案/分层练习/作业）浏览器直接看/转 PDF。视觉见下方「视觉与版式」。**快速验证质量、给老师先看效果用档 A。**
-> - **档 B（真实 Office 文件包）**：`python scripts/lesson_pack_gen.py --out <输出目录> --data <内容.json> [--theme …]`，落成 `教学设计.docx` + `学习任务单.docx` + `课堂分层练习.docx` + `课后作业.docx` + `教学课件.pptx`。PPT 为**数据驱动通用课件**（封面/目标/重难点/各环节页/小结/作业收尾，页数随环节动态，任意学科可用），不传 `--data` 用内置数学样例兜底。**老师要可编辑/打印/上交用档 B。**
+> - **档 A（自包含 HTML 教学包）**：`python scripts/lesson_pack_html.py --data <内容.json> --out 教学包.html [--strict-time]`，渲染为一页页"纸张"（教学设计/学案/分层练习/作业）浏览器直接看/转 PDF。视觉见下方「视觉与版式」。**快速验证质量、给老师先看效果用档 A。**（档 A 不含课件页，课件走档 B 的 pptx。）
+> - **档 B（真实 Office 文件包）**：`python scripts/lesson_pack_gen.py --out <输出目录> --data <内容.json> [--theme …] [--strict-time]`，落成 `教学设计.docx` + `学习任务单.docx` + `课堂分层练习.docx` + `课后作业.docx` + `教学课件.pptx`。PPT 为**数据驱动通用课件**（封面/目标/重难点/各环节页/小结/作业收尾，页数随环节动态，任意学科可用），不传 `--data` 用内置数学样例兜底。**老师要可编辑/打印/上交用档 B。**
 > - **主题（--theme，仅档B）**：默认数学深蓝；可换学科预设(数学/语文/英语/物理/化学/生物/历史/地理/通用)或 `#hex` 自定义主色(自动派生淡色板)。红笔警示色 #b3261e 为约定色不随主题。示例：`--theme 语文` / `--theme '#C0392B'`。
 > - **建议**：先档 A 看效果确认内容，再补档 B 文件包交付老师。
 
@@ -103,6 +104,9 @@ version: 0.1.0
 - ❌ 目标写成"理解重要性"这类不可测话 → 用动作动词。
 - ❌ 档A 渲染题干时**先替换填空线再整串 esc()** → 会把刚插入的 `<span class=fill>` 也转义，页面漏出原始 html 标签。**顺序必须：先 esc 题干，再做填空线替换**（见 scripts/lesson_pack_html.py 的 body_multi）。
 - ❌ 档B 学案"学习目标"写死数学模板 → 必须从 LESSON['教学目标'] 动态生成，否则语文/英语会带出一元一次方程的目标。
+- ❌ 内容 JSON 只写了部分顶层键就指望脚本补全 → 不会补，缺哪个键跳过对应产物。**宁可少给一样，也不能给错题**（曾发生"《咏雪》的作业里是一元一次方程"）。
+- ❌ 重难点在 JSON 里又写一遍"重点："前缀 → 脚本会统一加前缀，数据里带前缀要先去重，否则出现"重点：重点：…"。章节同理，别写"第"再让脚本加一个"第"。
+- ⚠️ 生成失败要看退出码：档B 单个产物失败仍会生成其余文件，但**退出码非 0** 且结尾汇总失败清单。脚本化调用请判退出码，别只看"生成了几个文件"。
 - ⚠️ 面向未成年人的教学包：不采集、不保存任何学生真实个人信息；学情只做"描述性分层"(基础薄弱/中等/优秀)不做实名。产物全本地。
 
 ## 视觉与版式（重要：去"AI 模板感"，做"真实教案/卷子"质感）

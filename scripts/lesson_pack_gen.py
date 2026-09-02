@@ -12,7 +12,7 @@ lesson-pack 档B 生成器：把单源内容(JSON)落成成套真实 Office 文�
   可直接跑示例见 ../templates/示例_语文_七年级_咏雪_40分钟.json。
 不传 --data 时回退到内置数学《一元一次方程》样例（脚本底部 LESSON 等四结构）。
 """
-import os, sys, argparse, json
+import os, sys, argparse, json, colorsys
 from docx import Document
 from docx.shared import Pt, RGBColor, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
@@ -56,6 +56,39 @@ def _px(h):
     h = h.lstrip('#')
     return RGBColor(int(h[0:2],16), int(h[2:4],16), int(h[4:6],16))
 
+
+def _normalize_hex(theme):
+    """把 --theme 的非预设取值规范成 6 位大写 hex；非法则返回 None。
+    自定义主色真正参与调色板派生后，非法输入（如 --theme XX未知色）会在 int() 处崩溃，
+    这里提前拦下并给出可用取值提示。"""
+    raw = theme.lstrip('#').strip()
+    if len(raw) == 3:                       # 支持 #C39 简写 → CC3399
+        raw = ''.join(c * 2 for c in raw)
+    if len(raw) != 6:
+        return None
+    try:
+        int(raw, 16)
+    except ValueError:
+        return None
+    return raw.upper()
+
+
+def _mix_white(hexcolor, white_ratio=0.88):
+    """把主色朝白色混合，得到淡底（如 pale）。white_ratio=0.88 表示白占 88%。"""
+    h = hexcolor.lstrip('#')
+    rgb = [int(h[i:i+2], 16) for i in (0, 2, 4)]
+    return ''.join(f"{round(c * (1 - white_ratio) + 255 * white_ratio):02X}" for c in rgb)
+
+
+def _rotate_hue(hexcolor, deg):
+    """色相旋转得到辅色（acc2），保持明度/饱和度不变。"""
+    h = hexcolor.lstrip('#')
+    r, g, b = [int(h[i:i+2], 16) / 255 for i in (0, 2, 4)]
+    hh, ll, ss = colorsys.rgb_to_hls(r, g, b)
+    hh = (hh + deg / 360.0) % 1.0
+    r, g, b = colorsys.hls_to_rgb(hh, ll, ss)
+    return ''.join(f"{round(c * 255):02X}" for c in (r, g, b))
+
 def _ppx(h):
     h = h.lstrip('#')
     return PRGB(int(h[0:2],16), int(h[2:4],16), int(h[4:6],16))
@@ -68,11 +101,18 @@ def apply_theme(theme):
     global CUR
     t = THEMES.get(theme)
     if t is None:
-        # 当作自定义主色
-        h = theme if theme.startswith('#') else '#'+theme
-        base = h.lstrip('#')
-        # 推导 acc=pale-深一档(pale 手动给浅一点)
-        t = {"head": base, "acc": base, "pale":"EEF1F6", "pale_r":"FCEEED", "red":"B3261E", "acc2": base}
+        # 当作自定义主色：真正派生一套淡色板（旧实现 pale/acc2 是写死的，
+        # 与 SKILL.md 里"自动派生淡色板"的说法不符——现在名副其实）
+        base = _normalize_hex(theme)
+        if base is None:
+            raise SystemExit(
+                f"✗ --theme 取值非法：{theme!r}。"
+                f"可用预设：{'/'.join(THEMES)}；或 6 位十六进制主色，如 '#C0392B'（也支持 #C39 简写）。")
+        t = {"head": base, "acc": base,
+             "pale":   _mix_white(base, 0.88),   # 主色 12% + 白 88% → 极淡底
+             "pale_r": "FCEEED",                 # 警示淡底为约定色，不随主题
+             "red":    "B3261E",                 # 红笔批注为约定色，不随主题
+             "acc2":   _rotate_hue(base, 150)}   # 色相旋转得到辅色
     d = {k: _px(v) for k,v in t.items()}      # docx RGBColor
     # ppt PRGB（仅当 python-pptx 可用；否则该侧为空，不影响 docx 生成）
     p = {}
@@ -251,34 +291,80 @@ HOMEWORK = {
     ],
 }
 
+# 上面四个结构仅作「不传 --data」时的演示样例。传入外部 JSON 后 USING_SAMPLE=False，
+# 缺失的键一律跳过对应产物，绝不回填内置样例（详见 load_data 说明）。
+USING_SAMPLE = True
+
+def check_time(L):
+    """时间账硬校验（quality-checklist A 项）：时间总表求和 == 课时，且环节分求和也 == 课时。
+    返回 (ok, 问题列表)。不抛异常——由调用方决定告警还是失败。"""
+    issues = []
+    total = None
+    try:
+        total = sum(int(m) for _, m in L.get('时间总表') or [])
+    except Exception as e:
+        issues.append(f"时间总表格式异常（应为 [[环节名, 分钟], …]）：{e}")
+    if total is not None:
+        try:
+            if total != int(L.get('课时')):
+                issues.append(f"时间总表合计 {total}′ ≠ 课时 {L.get('课时')}′")
+        except Exception:
+            issues.append(f"课时字段缺失或非数字：{L.get('课时')!r}")
+    # 环节分之和（schema 硬规则第 2 条，此前只校验了时间总表，这里补齐）
+    try:
+        ph_sum = sum(int(p['分']) for p in L.get('环节') or [])
+        if ph_sum != int(L.get('课时')):
+            issues.append(f"各环节分钟合计 {ph_sum}′ ≠ 课时 {L.get('课时')}′")
+    except Exception as e:
+        issues.append(f"环节分钟（环节[].分）格式异常：{e}")
+    return (len(issues) == 0), issues
+
+
 def load_data(path):
-    """从外部单源 JSON 载入内容，覆盖内置样例，实现任意学科/课题通用化。
+    """从外部单源 JSON 载入内容，实现任意学科/课题通用化。
     JSON 顶层四个键与渲染逻辑解耦（结构见 templates/lesson-content.schema.md）：
       lesson           → LESSON            (dict，含学科/年级/课题/环节/板书…)
       worksheet_tasks  → WORKSHEET_TASKS   ([[任务名, 序号, 题面…]])
       exercises        → EXERCISES         ([[组名, [[题号,题面,答案]…]], …])
       homework         → HOMEWORK          ({组名: [[题号,题面,答案]…]})
-    渲染函数原样消费这些结构，本 loader 只负责"替换数据源"。
+
+    ⚠ 关键约定：一旦传入外部 JSON，**绝不用内置数学样例回填缺失的键**。
+    旧实现是"只覆盖 JSON 里存在的键"，缺 worksheet_tasks 时保留内置《一元一次方程》，
+    结果产出"语文《咏雪》的学案里全是方程题"的串味事故且无任何提示。
+    现在的策略：缺哪个键 → 对应产物直接跳过并明确告知，宁缺勿错。
+    内置样例只在「不传 --data」的演示模式下生效。
     """
-    global LESSON, WORKSHEET_TASKS, EXERCISES, HOMEWORK
+    global LESSON, WORKSHEET_TASKS, EXERCISES, HOMEWORK, USING_SAMPLE
     with open(path, encoding='utf-8') as f:
         j = json.load(f)
-    if 'lesson' in j:        LESSON = j['lesson']
-    if 'worksheet_tasks' in j:  WORKSHEET_TASKS = j['worksheet_tasks']
-    if 'exercises' in j:     EXERCISES = j['exercises']
-    if 'homework' in j:      HOMEWORK = j['homework']
-    # 基本校验：时间账必须精确=课时长（与 quality-checklist 硬规则一致）
-    if isinstance(LESSON.get('时间总表'), list):
-        total = sum(m for _, m in LESSON['时间总表'])
-        if total != LESSON.get('课时'):
-            print(f"  ⚠ 时间账不等：时间总表合计 {total}′，课时标 {LESSON.get('课时')}′")
+    if 'lesson' not in j:
+        raise SystemExit("✗ 内容 JSON 缺顶层 'lesson' 键（结构见 templates/lesson-content.schema.md）")
+    LESSON = j['lesson']
+    WORKSHEET_TASKS = j.get('worksheet_tasks', [])
+    EXERCISES = j.get('exercises', [])
+    HOMEWORK = j.get('homework', {})
+    USING_SAMPLE = False
     return LESSON
 
-def answer_block(doc, items):
-    """练习/作业的答案块"""
-    rich_para(doc, [("参考答案（老师保留，勿随卷下发）", True, RED)], size=13, space_after=6)
-    for no, stem, ans in items:
-        para(doc, f"{no}. {ans}", size=11.5, color=INK, space_after=3)
+def strip_prefix(text, prefixes):
+    """去掉数据里自带的"重点：/难点：/突破："类前缀。
+    渲染时脚本统一加前缀，若数据本身已带（示例 JSON 就是），不去重会输出
+    "重点：重点：疏通文意…"。此处做幂等处理，两种写法都能正确渲染。"""
+    t = str(text).strip()
+    for p in prefixes:
+        if t.startswith(p):
+            return t[len(p):].strip()
+    return t
+
+
+def chapter_text(L):
+    """章节文案：数据里常写成"第三章""第二单元第8课"，已自带"第"字。
+    旧实现硬编码 f"第{章节}" → 输出"第第三章"。这里做幂等：已有"第"开头就不再加。"""
+    ch = str(L.get('章节', '')).strip()
+    if not ch:
+        return ch
+    return ch if ch.startswith('第') else f"第{ch}"
+
 
 def make_design_docx(path):
     doc = Document()
@@ -288,13 +374,13 @@ def make_design_docx(path):
     L = LESSON
 
     title(doc, "教 学 设 计")
-    para(doc, f"{L['教材']} · 第{L['章节']} ·  {L['课题']}（{L['课时标签']} · {L['课型']}）",
+    para(doc, f"{L['教材']} · {chapter_text(L)} ·  {L['课题']}（{L['课时标签']} · {L['课型']}）",
          size=11, color=GRAY, align=WD_ALIGN_PARAGRAPH.CENTER, space_after=10, cn='宋体')
 
     # 表头信息
     t = doc.add_table(rows=2, cols=4); t.style = 'Table Grid'; t.alignment = WD_TABLE_ALIGNMENT.CENTER
     hdr = [("学科 / 年级", f"{L['学科']} · {L['年级']}"), ("课型", L['课型']),
-           ("教材位置", L['教材'] + " " + L['章节'] + " 第1节"), ("课时", f"{L['课时']} 分钟")]
+           ("教材位置", f"{L['教材']} {chapter_text(L)}"), ("课时", f"{L['课时']} 分钟")]
     for i,(k,v) in enumerate(hdr):
         cell_text(t.cell(i//2, (i%2)*2), k, bold=True); hline(t.cell(i//2, (i%2)*2))
         cell_text(t.cell(i//2, (i%2)*2+1), v)
@@ -308,11 +394,14 @@ def make_design_docx(path):
         for it in items:
             rich_para(doc, [("• "+it, False, INK)], size=12)
 
-    # 重难点
+    # 重难点（前缀由脚本统一加；数据若已带前缀则先去重，避免"重点：重点：…"）
     heading(doc, "二、教学重难点")
-    rich_para(doc, [("重点：", True, INK), (L['重难点'][0], False, INK)])
-    rich_para(doc, [("难点：", True, INK), (L['重难点'][1], False, INK)])
-    rich_para(doc, [("突破：", True, RED), (L['重难点'][2], False, RED)])
+    rich_para(doc, [("重点：", True, INK),
+                    (strip_prefix(L['重难点'][0], ("重点：", "重点:")), False, INK)])
+    rich_para(doc, [("难点：", True, INK),
+                    (strip_prefix(L['重难点'][1], ("难点：", "难点:")), False, INK)])
+    rich_para(doc, [("突破：", True, RED),
+                    (strip_prefix(L['重难点'][2], ("突破：", "突破:", "难点突破：", "难点突破策略：")), False, RED)])
 
     # 学情
     heading(doc, "三、学情分析")
@@ -337,10 +426,12 @@ def make_design_docx(path):
     # 板书
     heading(doc, "五、板书设计")
     board = doc.add_table(rows=1, cols=3); board.style='Table Grid'
-    b = L['板书']
-    cell_text(board.cell(0,0), b['title']+"\n"+b['concept']+"\n"+"\n".join(b['left']), size=11)
-    cell_text(board.cell(0,1), "\n".join(b['mid']), size=11)
-    cell_text(board.cell(0,2), "\n".join(b['right']), size=11)
+    # 各分区用 .get 兜底：concept 缺失时旧实现直接 KeyError，导致整份教案生成失败
+    b = L.get('板书') or {}
+    left_txt = "\n".join([b.get('title') or L['课题'], b.get('concept') or ''] + list(b.get('left') or []))
+    cell_text(board.cell(0,0), left_txt.strip(), size=11)
+    cell_text(board.cell(0,1), "\n".join(b.get('mid') or []), size=11)
+    cell_text(board.cell(0,2), "\n".join(b.get('right') or []), size=11)
     doc.add_paragraph()
     para(doc, "—— 教学设计 · 完 ——", size=10.5, color=GRAY, align=WD_ALIGN_PARAGRAPH.CENTER)
     doc.save(path)
@@ -368,12 +459,36 @@ def make_worksheet_docx(path):
     para(doc, "—— 学习任务单 · 发给学生当堂用 ——", size=10.5, color=GRAY, align=WD_ALIGN_PARAGRAPH.CENTER)
     doc.save(path); return path
 
+def exercise_minutes(L):
+    """课堂练习卷的建议用时。取值优先级：
+    1) lesson.练习时长（显式指定）；
+    2) 名称含"练习/巩固/训练/检测"的环节分钟数；
+    3) 兜底 = 课时/3（夹在 5–20′）。
+    旧实现档B 硬编码"时间 15′"、档A 显示整节课时长，两者都不对且互相打架。"""
+    v = L.get('练习时长')
+    if v:
+        try:
+            return int(v)
+        except Exception:
+            pass
+    for ph in (L.get('环节') or []):
+        if any(k in str(ph.get('名', '')) for k in ('练习', '巩固', '训练', '检测')):
+            try:
+                return int(ph['分'])
+            except Exception:
+                pass
+    try:
+        return min(20, max(5, int(L.get('课时', 40)) // 3))
+    except Exception:
+        return 15
+
+
 def make_exercise_docx(path):
     doc = Document(); sec = doc.sections[0]
     sec.top_margin = sec.bottom_margin = Cm(2); sec.left_margin = sec.right_margin = Cm(2.5)
     title(doc, "课 堂 分 层 练 习", size=18)
     para(doc, LESSON['课题'] + " · 附答案（老师用，答案不下发）", size=11, color=GRAY, align=WD_ALIGN_PARAGRAPH.CENTER)
-    para(doc, "班级：＿＿＿＿　姓名：＿＿＿＿　　时间 15′", size=11, space_after=8)
+    para(doc, f"班级：＿＿＿＿　姓名：＿＿＿＿　　时间 {exercise_minutes(LESSON)}′", size=11, space_after=8)
     for group, items in EXERCISES:
         rich_para(doc, [(group, True, GRAY)], size=12)
         for no, stem, _ans in items:
@@ -417,8 +532,11 @@ def _set_run(r, size, bold=False, color=None, name='楷体'):
     ea.set('typeface', name)
 
 def make_ppt(path):
-    """正式可上课课件：封面/目录/配色标题栏/双栏版式/步骤时间轴/例题板书式公式/红框易错块。
-    视觉对齐 lesson-pack「真实教案」风格：白底+学科色块标题+黑墨主体+红笔标重点，不用花哨渐变。
+    """数据驱动的通用课件：封面 / 学习目标 / 重难点 / 导入 / 各环节一页 / 课堂小结 / 作业收尾。
+    页数随环节数动态变化，任意学科可用；视觉对齐 lesson-pack「真实教案」风格：
+    白底 + 学科色块标题栏 + 黑墨主体 + 红笔标重点，不用花哨渐变。
+    （早期版本有天平示意、四步流程、例题板书等理科专属页，通用化后已移除，
+      相关残留函数 big_formula / para_tf 一并清理，避免误导后来人。）
     """
     if not PPT_OK:
         return None
@@ -467,15 +585,6 @@ def make_ppt(path):
         nf=nb.text_frame; nf.word_wrap=False; np=nf.paragraphs[0]; np.text = f"{stage}" + (f" · 建议 {timemin}′" if timemin else "")
         for r in np.runs: _set_run(r, 11, False, SUB)
 
-    def para_tf(tf, items, size=20, first=False, color=INKC):
-        """写多行文本，items: list of (text, bold, color, size_override)"""
-        for i,(txt,bold,col,sz) in enumerate(items):
-            p = tf.paragraphs[0] if (i==0 and first) else tf.add_paragraph()
-            p.space_after = PPt(8)
-            r = p.add_run(); r.text = txt
-            _set_run(r, sz or size, bold, col or color)
-        return tf
-
     def bullet_box(s, x, y, w, h, title, rows, size=20, title_color=HEAD, fill=PALE):
         """圆角色块容器(教学要点/概念卡片)"""
         box = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, x, y, w, h)
@@ -494,25 +603,6 @@ def make_ppt(path):
             _set_run(r, size, False, INKC)
         return box
 
-    def big_formula(s, x, y, w, h, lines, size=34, align_center=True, box=False):
-        """板书式大公式/解题过程，白底细框，深色字"""
-        if box:
-            bb=s.shapes.add_shape(MSO_SHAPE.RECTANGLE, x,y,w,h)
-            bb.fill.solid(); bb.fill.fore_color.rgb=PAPER
-            bb.line.color.rgb=PRGB(0x99,0x99,0x99); bb.line.width=PPt(1); bb.shadow.inherit=False
-            tf=bb.text_frame
-        else:
-            tb=s.shapes.add_textbox(x,y,w,h); tf=tb.text_frame
-        tf.word_wrap=True; tf.margin_left=Inches(0.3); tf.margin_right=Inches(0.2)
-        first=True
-        for txt,rc in lines:
-            p = tf.paragraphs[0] if first else tf.add_paragraph(); first=False
-            p.alignment = _PPA.CENTER if align_center else _PPA.LEFT
-            p.space_after = PPt(10)
-            r=p.add_run(); r.text=txt
-            _set_run(r, size, (rc==REDC), rc if rc in (REDC,ACC,HEAD) else INKC, '楷体')
-        return tf
-
     # ============================================================
     # 课件内容组装 —— 完全由单源 LESSON 驱动，任意学科/环节数通用。
     # 页结构：封面 / 目标 / 重难点 / 导入(环节[0]) / 各环节一页 / 作业收尾
@@ -520,7 +610,16 @@ def make_ppt(path):
     L = LESSON
     def _cn(n):
         CN = ["零","一","二","三","四","五","六","七","八","九"]
-        return CN[n] if n < 10 else ("十" if n==10 else CN[1]+"十"+CN[n-10])
+        n = int(n)
+        if n < 10:
+            return CN[n]
+        if n == 10:
+            return "十"
+        if n < 20:
+            return "十" + CN[n-10]
+        # 20 及以上：旧实现 CN[n-10] 会越界崩溃。环节数不会真到 20，
+        # 但宁可退化成阿拉伯数字也别让脚本挂掉。
+        return str(n)
     def clip(s, n=6):
         segs = [x.strip() for x in str(s).replace('①','。①').replace('②','。②')
                 .replace('③','。③').replace('④','。④').split('。') if x.strip()]
@@ -599,10 +698,18 @@ def make_ppt(path):
         phase_page(ph, f"环节{_cn(idx)} · {ph['分']}′")
 
     # ---- 课堂小结总览 ----
+    # 旧实现固定取"倒数第二个环节"，当小结与作业合并成最后一个环节时（如语文《咏雪》的
+    # "五、小结与作业布置"），倒数第二个其实是"品读新授"，小结页会显示成新授内容。
+    # 改为按名称定位小结环节，找不到再回退到倒数第二个。
     s=prs.slides.add_slide(blank); bg(s); title_bar(s,"课堂小结 · 一图回顾","小结")
-    recap = []
-    if n_ph >= 2:
-        recap = clip(rowmap(L['环节'][-2]).get('教师活动',''), 4)
+    recap_src = None
+    for ph in reversed(L['环节']):
+        if any(k in str(ph.get('名', '')) for k in ('小结', '总结', '回顾')):
+            recap_src = ph
+            break
+    if recap_src is None and n_ph >= 2:
+        recap_src = L['环节'][-2]
+    recap = clip(rowmap(recap_src).get('教师活动', ''), 4) if recap_src else ["（见教学设计）"]
     bullet_box(s, Inches(1.0), Inches(1.8), Inches(6.4), Inches(3.4),
         "一起回顾", recap, size=18)
     bullet_box(s, Inches(7.6), Inches(1.8), Inches(5.0), Inches(3.4),
@@ -615,24 +722,28 @@ def make_ppt(path):
     for r in p.runs: _set_run(r, 20, True, REDC, '黑体')
 
     # ---- 作业收尾（环节[-1]，通常是作业布置）----
-    lastph = L['环节'][-1]
-    d = rowmap(lastph)
-    s=prs.slides.add_slide(blank); bg(s); title_bar(s, lastph['名'], "收尾")
-    hw_rows = []
-    if isinstance(L.get('homework'), dict):
-        for g, items in L['homework'].items():
-            hw_rows.append(f"《{g}》 · {len(items)} 题")
-    if not hw_rows:
-        hw_rows = clip(d.get('教师活动',''), 4)
-    bullet_box(s, Inches(1.0), Inches(1.8), SW-Inches(2.0), Inches(3.4),
-        "课后作业（详见作业纸）", hw_rows, size=20)
-    tips = clip(d.get('教师活动',''), 2)
-    nx=s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(1.0), Inches(5.4), SW-Inches(2.0), Inches(1.3))
-    nx.fill.solid(); nx.fill.fore_color.rgb=PALE; nx.line.color.rgb=ACC; nx.line.width=PPt(1); nx.shadow.inherit=False
-    tf=nx.text_frame; tf.margin_top=Inches(0.12); tf.word_wrap=True
-    p=tf.paragraphs[0]; p.text="收尾：" + (tips[0] if tips else "见教学设计")
-    for r in p.runs: _set_run(r, 18, True, ACC)
-    note_bar(s, "收尾", lastph['分'])
+    # 旧实现读 L.get('homework')：homework 是顶层键、不在 lesson 里，永远取不到，
+    # 导致作业页始终退化成"教师活动"文本，列出的作业组/题数从未生效过。
+    # 只有 1 个环节时，环节[0] 已在导入页出过，再出一页收尾会重复同一环节
+    if n_ph >= 2:
+        lastph = L['环节'][-1]
+        d = rowmap(lastph)
+        s=prs.slides.add_slide(blank); bg(s); title_bar(s, lastph['名'], "收尾")
+        hw_rows = []
+        if isinstance(HOMEWORK, dict) and HOMEWORK:
+            for g, items in HOMEWORK.items():
+                hw_rows.append(f"《{g}》 · {len(items)} 题")
+        if not hw_rows:
+            hw_rows = clip(d.get('教师活动',''), 4)
+        bullet_box(s, Inches(1.0), Inches(1.8), SW-Inches(2.0), Inches(3.4),
+            "课后作业（详见作业纸）", hw_rows, size=20)
+        tips = clip(d.get('教师活动',''), 2)
+        nx=s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(1.0), Inches(5.4), SW-Inches(2.0), Inches(1.3))
+        nx.fill.solid(); nx.fill.fore_color.rgb=PALE; nx.line.color.rgb=ACC; nx.line.width=PPt(1); nx.shadow.inherit=False
+        tf=nx.text_frame; tf.margin_top=Inches(0.12); tf.word_wrap=True
+        p=tf.paragraphs[0]; p.text="收尾：" + (tips[0] if tips else "见教学设计")
+        for r in p.runs: _set_run(r, 18, True, ACC)
+        note_bar(s, "收尾", lastph['分'])
 
     prs.save(path); return path
 
@@ -644,34 +755,67 @@ def main():
                          "或 '#hex' 自定义主色，例如 --theme 语文 或 --theme '#C0392B'")
     ap.add_argument('--data', default=None,
                     help="单源内容 JSON 路径（结构见 templates/lesson-content.schema.md）。"
-                         "缺省用内置数学《一元一次方程》样例。")
+                         "缺省用内置数学《一元一次方程》演示样例。")
+    ap.add_argument('--strict-time', action='store_true',
+                    help="时间账（环节分钟合计≠课时）不平时直接终止，不生成任何文件。"
+                         "默认仅告警后继续。")
     a = ap.parse_args()
-    # 外部单源 JSON → 覆盖内置数据结构，实现任意学科/课题通用化
+    # 外部单源 JSON → 替换内置数据结构，实现任意学科/课题通用化
     if a.data:
         load_data(a.data)
     # 先应用主题：整套 docx + pptx 的主色统一走主题，红笔警示色保持约定
     apply_theme(a.theme)
     os.makedirs(a.out, exist_ok=True)
     g = os.path.join
-    files = {
-        "教学设计.docx": make_design_docx,
-        "学习任务单.docx": make_worksheet_docx,
-        "课堂分层练习.docx": make_exercise_docx,
-        "课后作业.docx": make_homework_docx,
-        "教学课件.pptx": make_ppt,
-    }
-    made=[]
-    skip=[]
-    for name, fn in files.items():
+
+    # 时间账硬校验（quality-checklist A 项）：不平要显式说出来，不能静默产出
+    ok, issues = check_time(LESSON)
+    if not ok:
+        print("  ⚠ 时间账不平（quality-checklist A 项，请修订内容 JSON）：")
+        for it in issues:
+            print("      - " + it)
+        if a.strict_time:
+            raise SystemExit("✗ 已启用 --strict-time，时间账不平即终止，未生成任何文件。")
+
+    # 产物 → 依赖的顶层数据键。键缺失/为空则跳过该产物并说明，
+    # 绝不退回内置数学样例（否则会出现"语文课配方程作业"的串味事故）。
+    files = [
+        ("教学设计.docx",   make_design_docx,   'lesson',          bool(LESSON)),
+        ("学习任务单.docx", make_worksheet_docx,'worksheet_tasks', bool(WORKSHEET_TASKS)),
+        ("课堂分层练习.docx", make_exercise_docx, 'exercises',     bool(EXERCISES)),
+        ("课后作业.docx",   make_homework_docx, 'homework',        bool(HOMEWORK)),
+        ("教学课件.pptx",   make_ppt,           'lesson',          bool(LESSON)),
+    ]
+    made, skipped, failed = [], [], []
+    for name, fn, key, ready in files:
+        if not ready:
+            skipped.append(f"{name}（内容 JSON 未提供 '{key}'）")
+            continue
         try:
             p = fn(g(a.out, name))
-            if p: made.append(p)
-            else: skip.append(name)   # 该产物依赖 python-pptx 但当前环境不可用 → 优雅跳过
+            if p:
+                made.append(p)
+            else:
+                skipped.append(f"{name}（缺 python-pptx，已优雅跳过）")
         except Exception as e:
-            print(f"  ✗ {name}: {e}")
-    print(f"主题：{CUR['name']}；数据源：{'外部 '+a.data if a.data else '内置数学样例'}；已生成 {len(made)} 个文件：")
-    for p in made: print("  "+p)
-    if skip: print("  已跳过(缺 python-pptx): " + ", ".join(skip))
+            failed.append(name)
+            print(f"  ✗ {name} 生成失败：{e}")
+
+    src = ('外部 ' + a.data) if a.data else '内置数学《一元一次方程》演示样例'
+    print(f"主题：{CUR['name']}；数据源：{src}；已生成 {len(made)} 个文件：")
+    for p in made:
+        print("  " + p)
+    if skipped:
+        print("  已跳过：")
+        for s in skipped:
+            print("    - " + s)
+    if not a.data:
+        print("  提示：未传 --data，当前产出为内置演示样例，请勿直接用于教学。")
+
+    # 失败必须以非 0 退出码暴露，避免自动化/脚本误判为"全部成功"而拿到残缺包
+    if failed:
+        print(f"✗ {len(failed)} 个产物生成失败：{', '.join(failed)}")
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()
