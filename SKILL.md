@@ -1,6 +1,10 @@
 ---
 name: lesson-pack
 description: 课时教学包生成器。面向中小学老师，输入「学科/年级/当节课内容/课时长」，一次生成整套配套：教学设计(教案) + 教学课件PPT + 学习任务单(学案) + 分层练习题(含答案) + 课后作业。所有教学环节的时间分配严格等于上课时长。当用户要备课、生成教案/课件/教学设计/导学案、为一节课准备配套材料、按课时长规划一节课时使用。触发词：备课、教案、教学设计、课件、导学案、教学包、课时、这节课怎么上。
+display_name: 课时教学包生成器
+display_name_en: Lesson Pack Generator
+description_zh: 面向中小学老师的一节课成套备课生成器。输入「学科 + 年级 + 课题 + 课时长」，一次产出教学设计(教案)、教学课件、学习任务单(学案)、分层练习题(含答案)、课后作业整套配套，全环节时间严格等于上课时长，可喂教材原文、适配中国课标/人教版。
+description_en: "One-shot lesson package generator for K-12 teachers. Input subject + grade + topic + class length, and get a complete set: lesson plan, slides, worksheet, leveled exercises (with answers) and homework — with every segment's minutes summing exactly to the class duration. Adapts to China curriculum standards and supports feeding textbook source text."
 agent_created: true
 version: 0.1.0
 ---

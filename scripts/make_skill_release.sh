@@ -27,6 +27,33 @@ DIST="$ROOT/dist"
 OUT_DIR="$DIST/lesson-pack"
 OUT_ZIP="$DIST/lesson-pack.zip"
 
+# 解析 SKILL.md frontmatter 并校验必填元数据字段（依赖 python3 + pyyaml）。
+# 缺失/含半角"冒号+空格"未加引号导致 YAML 解析失败时，打包会报「缺少 display_name/
+# display_name_en/description_zh/description_en」——此函数在生成包前拦截，避免发布后才发现。
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+check_frontmatter() {
+  "$PYTHON_BIN" - "$ROOT/SKILL.md" <<'PYEOF'
+import re, sys, yaml
+path = sys.argv[1]
+txt = open(path, encoding='utf-8').read()
+m = re.match(r'^---\n(.*?)\n---', txt, re.S)
+if not m:
+    sys.exit('❌ SKILL.md 缺少 frontmatter (--- ... ---)')
+try:
+    d = yaml.safe_load(m.group(1))
+except Exception as e:
+    sys.exit(f'❌ SKILL.md frontmatter YAML 解析失败（含半角冒号+空格的值请用引号包裹）: {e}')
+req = ['name', 'display_name', 'display_name_en', 'description', 'description_zh', 'description_en', 'version']
+missing = [k for k in req if not d or not d.get(k)]
+if missing:
+    sys.exit('❌ SKILL.md frontmatter 缺少字段: ' + ', '.join(missing))
+print('✅ SKILL.md frontmatter 校验通过: ' + ', '.join(f'{k}✓' for k in req))
+PYEOF
+}
+
+echo "▶ 校验 SKILL.md frontmatter（display_name/description_zh 等必填元数据）"
+check_frontmatter
+
 echo "▶ 生成干净两级 skill 副本 → $OUT_DIR"
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
@@ -35,6 +62,7 @@ mkdir -p "$OUT_DIR"
 rsync -a \
   --exclude='.git/' \
   --exclude='.gitignore' \
+  --exclude='.workbuddy/' \
   --exclude='LICENSE' \
   --exclude='README.md' \
   --exclude='assets/' \
